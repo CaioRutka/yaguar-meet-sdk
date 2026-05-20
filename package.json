@@ -1,0 +1,83 @@
+{
+  "name": "@yaguar/meet",
+  "version": "0.1.0",
+  "description": "Yaguar Meet — framework-agnostic SDK: rooms, WebRTC signaling, recording, AI analysis (server) + WebRTC client primitives (browser)",
+  "private": true,
+  "license": "UNLICENSED",
+  "author": "Yaguar",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/CaioRutka/yaguar-meet-sdk.git"
+  },
+  "homepage": "https://github.com/CaioRutka/yaguar-meet-sdk",
+  "bugs": {
+    "url": "https://github.com/CaioRutka/yaguar-meet-sdk/issues"
+  },
+  "type": "module",
+  "sideEffects": false,
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    },
+    "./server": {
+      "types": "./dist/server/index.d.ts",
+      "import": "./dist/server/index.js",
+      "require": "./dist/server/index.cjs"
+    },
+    "./client": {
+      "types": "./dist/client/index.d.ts",
+      "import": "./dist/client/index.js",
+      "require": "./dist/client/index.cjs"
+    },
+    "./shared": {
+      "types": "./dist/shared/index.d.ts",
+      "import": "./dist/shared/index.js",
+      "require": "./dist/shared/index.cjs"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
+    "build": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" && tsup",
+    "prepare": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" && tsup",
+    "prepack": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" && tsup",
+    "dev": "tsup --watch",
+    "typecheck": "tsc --noEmit",
+    "lint": "tsc --noEmit --strict",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage"
+  },
+  "engines": {
+    "node": ">=20.9.0"
+  },
+  "dependencies": {
+    "@google/generative-ai": "^0.21.0",
+    "socket.io": "^4.8.0",
+    "socket.io-client": "^4.8.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@vitest/coverage-v8": "^2.1.0",
+    "tsup": "^8.3.0",
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  },
+  "keywords": [
+    "webrtc",
+    "socket.io",
+    "meet",
+    "video",
+    "audio",
+    "screen-share",
+    "gemini",
+    "ai",
+    "sdk"
+  ]
+}
