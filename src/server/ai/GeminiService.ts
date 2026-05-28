@@ -119,5 +119,21 @@ export class GeminiService implements AIService {
           : {},
     };
   }
+
+  async analyzeDocument(docName: string, docContent: string): Promise<string> {
+    const prompt = `Você é um engenheiro de prompts e especialista em capacitação de vendas.
+Analise o documento de vendas fornecido abaixo (Nome do arquivo: "${docName}").
+Crie um conjunto claro, direto e estruturado de instruções e diretrizes (pre-prompt) que descrevem exatamente como o vendedor deve se comportar, quais regras do produto seguir, quais gatilhos mentais usar e quais objeções contornar com base neste documento.
+O resultado final gerado deve ser redigido em português e será anexado diretamente ao prompt de avaliação de uma inteligência artificial para julgar a transcrição de chamadas desse vendedor.
+Evite introduções e explicações genéricas. Vá direto ao ponto, fornecendo as regras estruturadas em tópicos claros.
+
+Conteúdo do Documento:
+---
+${docContent}
+---`;
+
+    const result = await this.plainModel.generateContent(prompt);
+    return result.response.text().trim();
+  }
 }
 

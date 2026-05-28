@@ -11,4 +11,5 @@ export type { MeetingAnalysisResult };
 export interface AIService {
   transcribeAudioFile(filePath: string, mimeType: string): Promise<string>;
   analyzeMeeting(transcript: string, parameters: string[]): Promise<MeetingAnalysisResult>;
+  analyzeDocument(docName: string, docContent: string): Promise<string>;
 }
