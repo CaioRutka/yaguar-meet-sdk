@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtemp, readFile, readdir, rm, stat } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { RecordingSessionManager } from '../src/server/RecordingSessionManager';
@@ -25,8 +25,9 @@ describe('RecordingSessionManager', () => {
     const result = await mgr.stop('meeting-1');
     expect(result).not.toBeNull();
     if (!result) throw new Error('stop returned null');
-    expect(result.mimeType).toBe('audio/webm');
-    const data = await readFile(result.filePath, 'utf8');
+    expect(result.segments).toHaveLength(1);
+    expect(result.segments[0]?.mimeType).toBe('audio/webm');
+    const data = await readFile(result.segments[0]!.filePath, 'utf8');
     expect(data).toBe('hello-world');
     expect(mgr.hasSession('meeting-1')).toBe(false);
   });
@@ -50,19 +51,35 @@ describe('RecordingSessionManager', () => {
     expect(() => mgr.appendChunk('ghost', Buffer.from('x'))).not.toThrow();
   });
 
-  it('starting twice for same key discards the previous session', async () => {
+  it('pause and resume create multiple segments', async () => {
+    const mgr = new RecordingSessionManager(workDir);
+    await mgr.start('m1', 'audio/webm');
+    mgr.appendChunk('m1', Buffer.from('first'));
+    await mgr.pause('m1');
+
+    await mgr.start('m1', 'audio/webm');
+    mgr.appendChunk('m1', Buffer.from('second'));
+
+    const result = await mgr.stop('m1');
+    expect(result?.segments).toHaveLength(2);
+    const first = await readFile(result!.segments[0]!.filePath, 'utf8');
+    const second = await readFile(result!.segments[1]!.filePath, 'utf8');
+    expect(first).toBe('first');
+    expect(second).toBe('second');
+  });
+
+  it('starting again for same key finalizes the previous active segment', async () => {
     const mgr = new RecordingSessionManager(workDir);
     await mgr.start('m1', 'audio/webm');
     mgr.appendChunk('m1', Buffer.from('first'));
     await mgr.start('m1', 'audio/webm');
     mgr.appendChunk('m1', Buffer.from('second'));
     const result = await mgr.stop('m1');
-    expect(result).not.toBeNull();
-    if (!result) return;
-    const data = await readFile(result.filePath, 'utf8');
-    expect(data).toBe('second');
-    const stillThere = await stat(result.filePath).catch(() => null);
-    expect(stillThere).not.toBeNull();
+    expect(result?.segments).toHaveLength(2);
+    const first = await readFile(result!.segments[0]!.filePath, 'utf8');
+    const second = await readFile(result!.segments[1]!.filePath, 'utf8');
+    expect(first).toBe('first');
+    expect(second).toBe('second');
   });
 
   it('defaults the mime type to audio/webm when empty', async () => {
@@ -70,6 +87,6 @@ describe('RecordingSessionManager', () => {
     await mgr.start('m1', '   ');
     mgr.appendChunk('m1', Buffer.from('x'));
     const result = await mgr.stop('m1');
-    expect(result?.mimeType).toBe('audio/webm');
+    expect(result?.segments[0]?.mimeType).toBe('audio/webm');
   });
 });

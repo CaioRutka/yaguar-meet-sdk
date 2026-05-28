@@ -84,6 +84,7 @@ export class YaguarMeet extends EventEmitter {
       iceServers: this.iceServers,
       recording: this.recording,
       hooks: this.config.hooks,
+      requireRecording: this.config.requireRecording,
     });
 
     return this.io;
@@ -180,17 +181,22 @@ export class YaguarMeet extends EventEmitter {
       this.io.in(roomId).emit('meeting:ended', { roomId, meetingId });
     }
 
-    let tempPath: string | null = null;
-    let stopped: { filePath: string; mimeType: string } | null = null;
+    let tempPaths: string[] = [];
+    let stopped: { segments: { filePath: string; mimeType: string }[] } | null = null;
     try {
       stopped = await this.recording.stop(meetingId);
-      if (stopped) tempPath = stopped.filePath;
+      if (stopped) tempPaths = stopped.segments.map((s) => s.filePath);
 
       let transcript = '';
 
-      if (stopped && this.ai) {
+      if (stopped && stopped.segments.length > 0 && this.ai) {
         try {
-          transcript = await this.ai.transcribeAudioFile(stopped.filePath, stopped.mimeType);
+          const parts: string[] = [];
+          for (const segment of stopped.segments) {
+            const text = await this.ai.transcribeAudioFile(segment.filePath, segment.mimeType);
+            if (text.trim()) parts.push(text.trim());
+          }
+          transcript = parts.join('\n\n');
         } catch (e) {
           console.error('[YaguarMeet] transcribeAudioFile', e);
           await this.mergeMeetingMetadata(meetingId, {
@@ -199,7 +205,7 @@ export class YaguarMeet extends EventEmitter {
               'Não foi possível transcrever o áudio. Tente gravar novamente em outra reunião ou verifique o microfone.',
           });
         }
-      } else if (!stopped) {
+      } else if (!stopped || stopped.segments.length === 0) {
         await this.mergeMeetingMetadata(meetingId, {
           analysisFallback:
             'Nenhum áudio foi recebido. Só o anfitrião pode iniciar a gravação para IA — ative-a durante a próxima reunião.',
@@ -239,7 +245,7 @@ export class YaguarMeet extends EventEmitter {
               'A análise automática não pôde ser concluída. A transcrição bruta permanece disponível para o anfitrião no histórico.',
           });
         }
-      } else if (this.ai && !hasText && stopped) {
+      } else if (this.ai && !hasText && stopped && stopped.segments.length > 0) {
         const m = await this.adapter.getMeeting(meetingId);
         const existing = m?.metadata && typeof m.metadata.analysisFallback === 'string';
         if (!existing) {
@@ -282,8 +288,8 @@ export class YaguarMeet extends EventEmitter {
         }
       }
     } finally {
-      if (tempPath) {
-        await unlink(tempPath).catch(() => {});
+      for (const p of tempPaths) {
+        await unlink(p).catch(() => {});
       }
     }
   }

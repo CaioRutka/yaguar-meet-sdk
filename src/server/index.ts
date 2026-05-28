@@ -20,6 +20,7 @@ export { RoomManager } from './RoomManager';
 export type { LiveParticipant, MeetingProcessingContext, JoinRoomResult } from './RoomManager';
 
 export { RecordingSessionManager } from './RecordingSessionManager';
+export type { RecordingSegment } from './RecordingSessionManager';
 
 export { registerSocketHandlers } from './registerSocketHandlers';
 export type { SignalingContext } from './registerSocketHandlers';

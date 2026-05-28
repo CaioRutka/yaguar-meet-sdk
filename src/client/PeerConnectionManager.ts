@@ -197,8 +197,14 @@ export class PeerConnectionManager extends TypedEmitter<PeerConnectionManagerEve
       }
 
       const audioSender = senders.find((s) => s.track?.kind === 'audio');
-      if (audioSender && audio && audioSender.track?.id !== audio.id) {
-        void audioSender.replaceTrack(audio);
+      if (!audioSender && audio && this.localStream) {
+        pc.addTrack(audio, this.localStream);
+      } else if (audioSender && audio) {
+        const needsReplace =
+          audioSender.track?.id !== audio.id || audioSender.track?.readyState === 'ended';
+        if (needsReplace) {
+          void audioSender.replaceTrack(audio);
+        }
       }
     }
   }

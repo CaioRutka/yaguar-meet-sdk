@@ -96,6 +96,8 @@ export interface YaguarMeetConfig {
   recordingTmpDir?: string;
   auth?: YaguarMeetAuthConfig;
   hooks?: YaguarMeetHooks;
+  /** When true for a host user id, pausing server-side recording is rejected. */
+  requireRecording?: (userId: string) => Promise<boolean>;
 }
 
 export interface AttachOptions {

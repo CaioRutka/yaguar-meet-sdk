@@ -11,6 +11,7 @@ export interface SignalingContext {
   iceServers: IceServerConfig[];
   recording: RecordingSessionManager;
   hooks?: YaguarMeetHooks;
+  requireRecording?: (userId: string) => Promise<boolean>;
 }
 
 interface JoinPayload {
@@ -62,6 +63,15 @@ async function completeJoinedSocketSession(
   const roomRow = await ctx.adapter.getRoom(roomId);
   const isHost = Boolean(uid && roomRow?.createdBy === uid);
 
+  let requireRecording = false;
+  if (isHost && uid && ctx.requireRecording) {
+    try {
+      requireRecording = await ctx.requireRecording(uid);
+    } catch (e) {
+      console.error('[Socket] requireRecording lookup', e);
+    }
+  }
+
   socket.emit('room:participants', {
     participants: result.participants.map((p) => ({
       socketId: p.socketId,
@@ -71,7 +81,7 @@ async function completeJoinedSocketSession(
     isHost,
   });
 
-  socket.emit('room:session', { roomId, meetingId: result.meetingId, isHost });
+  socket.emit('room:session', { roomId, meetingId: result.meetingId, isHost, requireRecording });
 
   socket.to(roomId).emit('user:joined', {
     socketId: socket.id,
@@ -221,6 +231,30 @@ export function registerSocketHandlers(io: Server, ctx: SignalingContext) {
       });
     });
 
+    socket.on('room:mute-user', async ({ roomId, targetSocketId }: { roomId: string; targetSocketId: string }) => {
+      if (!(await isMeetingHost(ctx.adapter, socket, roomId))) {
+        socket.emit('room:error', { message: 'Apenas o anfitrião pode mutar participantes.' });
+        return;
+      }
+      const target = io.sockets.sockets.get(targetSocketId);
+      if (target) {
+        target.emit('room:muted-by-host', { roomId });
+      }
+    });
+
+    socket.on('room:remove-user', async ({ roomId, targetSocketId }: { roomId: string; targetSocketId: string }) => {
+      if (!(await isMeetingHost(ctx.adapter, socket, roomId))) {
+        socket.emit('room:error', { message: 'Apenas o anfitrião pode remover participantes.' });
+        return;
+      }
+      const target = io.sockets.sockets.get(targetSocketId);
+      if (target) {
+        target.emit('room:removed-by-host', { roomId });
+        target.disconnect(true);
+      }
+    });
+
+
     socket.on('mic:speaking', ({ roomId, speaking }: { roomId: string; speaking: boolean }) => {
       const data = socket.data as { roomId?: string };
       if (!roomId || data.roomId !== roomId) return;
@@ -253,10 +287,30 @@ export function registerSocketHandlers(io: Server, ctx: SignalingContext) {
       ctx.recording.appendChunk(key, Buffer.from(chunk, 'base64'));
     });
 
-    // Client stops the MediaRecorder only — do NOT call RecordingSessionManager.stop here.
-    // That would discard chunks before processMeetingPipeline runs when the room empties.
+    // Client stops the MediaRecorder — finalize the active segment on the server.
     socket.on('recording:stop', async ({ roomId }: RecordingPayload) => {
       if (!(await isMeetingHost(ctx.adapter, socket, roomId))) return;
+      const uid = (socket.data as { meetUserId?: string }).meetUserId;
+      if (uid && ctx.requireRecording) {
+        try {
+          if (await ctx.requireRecording(uid)) {
+            socket.emit('recording:error', {
+              message: 'A gravação é obrigatória nesta conta e não pode ser pausada.',
+            });
+            return;
+          }
+        } catch (e) {
+          console.error('[Socket] recording:stop requireRecording', e);
+        }
+      }
+      const mid = (socket.data as { meetingId?: string }).meetingId;
+      const key = mid ?? roomId;
+      try {
+        await ctx.recording.pause(key);
+      } catch (e) {
+        console.error('[Socket] recording:stop', e);
+        socket.emit('recording:error', { message: 'Não foi possível pausar a gravação.' });
+      }
     });
 
     socket.on('schedule:return', async (payload: SchedulePayload) => {

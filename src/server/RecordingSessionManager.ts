@@ -11,17 +11,27 @@ type SessionState = {
   stream: WriteStream;
 };
 
+export type RecordingSegment = {
+  filePath: string;
+  mimeType: string;
+};
+
+type MeetingRecording = {
+  segments: RecordingSegment[];
+  active: SessionState | null;
+};
+
 function safeKeySegment(key: string): string {
   return key.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 80);
 }
 
 /**
- * Appends audio chunks to a temp file per meeting (or room) for server-side processing.
- * Avoids holding the full recording in RAM.
+ * Appends audio chunks to temp files per meeting (or room) for server-side processing.
+ * Supports multiple segments when the host pauses and resumes recording.
  */
 export class RecordingSessionManager {
   private readonly tmpDir: string;
-  private sessions = new Map<string, SessionState>();
+  private meetings = new Map<string, MeetingRecording>();
   private ensuredMkdir = false;
 
   /**
@@ -37,39 +47,69 @@ export class RecordingSessionManager {
     this.ensuredMkdir = true;
   }
 
+  private getOrCreateMeeting(key: string): MeetingRecording {
+    let meeting = this.meetings.get(key);
+    if (!meeting) {
+      meeting = { segments: [], active: null };
+      this.meetings.set(key, meeting);
+    }
+    return meeting;
+  }
+
+  /** Starts a new recording segment (finalizes any active segment first). */
   async start(key: string, mimeType: string): Promise<void> {
     await this.ensureTmpDir();
-
-    const existing = this.sessions.get(key);
-    if (existing) {
-      await this.closeSessionDiscard(existing);
-      this.sessions.delete(key);
-    }
+    await this.finalizeActive(key);
 
     const fileName = `yaguar-meet-${safeKeySegment(key)}-${randomBytes(8).toString('hex')}.webm`;
     const filePath = path.join(this.tmpDir, fileName);
     const stream = createWriteStream(filePath, { flags: 'w' });
     const mime = mimeType?.trim() || 'audio/webm';
 
-    this.sessions.set(key, { filePath, mimeType: mime, stream });
+    const meeting = this.getOrCreateMeeting(key);
+    meeting.active = { filePath, mimeType: mime, stream };
   }
 
   appendChunk(key: string, data: Buffer): void {
-    const s = this.sessions.get(key);
-    if (!s) return;
-    s.stream.write(data);
+    const meeting = this.meetings.get(key);
+    const active = meeting?.active;
+    if (!active) return;
+    active.stream.write(data);
+  }
+
+  /** Finalizes the active segment without ending the meeting recording. */
+  async pause(key: string): Promise<void> {
+    await this.finalizeActive(key);
   }
 
   /**
-   * Finalizes the file and returns its path for upload/transcription.
-   * Deletes empty files and returns null.
+   * Finalizes any active segment and returns all segments for upload/transcription.
+   * Deletes empty files. Returns null when no audio was captured.
    */
-  async stop(key: string): Promise<{ filePath: string; mimeType: string } | null> {
-    const s = this.sessions.get(key);
-    if (!s) return null;
-    this.sessions.delete(key);
+  async stop(key: string): Promise<{ segments: RecordingSegment[] } | null> {
+    await this.finalizeActive(key);
+    const meeting = this.meetings.get(key);
+    if (!meeting || meeting.segments.length === 0) {
+      this.meetings.delete(key);
+      return null;
+    }
+    const segments = [...meeting.segments];
+    this.meetings.delete(key);
+    return { segments };
+  }
 
-    const { filePath, mimeType, stream } = s;
+  hasSession(key: string): boolean {
+    const meeting = this.meetings.get(key);
+    return Boolean(meeting?.active || (meeting?.segments.length ?? 0) > 0);
+  }
+
+  private async finalizeActive(key: string): Promise<void> {
+    const meeting = this.meetings.get(key);
+    const active = meeting?.active;
+    if (!active) return;
+
+    meeting!.active = null;
+    const { filePath, mimeType, stream } = active;
 
     try {
       stream.end();
@@ -83,17 +123,12 @@ export class RecordingSessionManager {
       const st = await stat(filePath);
       if (st.size === 0) {
         await unlink(filePath).catch(() => {});
-        return null;
+        return;
       }
+      meeting!.segments.push({ filePath, mimeType });
     } catch {
-      return null;
+      await unlink(filePath).catch(() => {});
     }
-
-    return { filePath, mimeType };
-  }
-
-  hasSession(key: string): boolean {
-    return this.sessions.has(key);
   }
 
   private async closeSessionDiscard(s: SessionState): Promise<void> {
