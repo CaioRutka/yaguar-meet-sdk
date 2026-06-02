@@ -1,6 +1,6 @@
 {
   "name": "@yaguar/meet",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Yaguar Meet — framework-agnostic SDK: rooms, WebRTC signaling, recording, AI analysis (server) + WebRTC client primitives (browser)",
   "private": true,
   "license": "UNLICENSED",
