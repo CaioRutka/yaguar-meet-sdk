@@ -157,12 +157,19 @@ describe('registerSocketHandlers', () => {
       meetingId: 'meet-123',
       scheduledFor: '2026-12-10T15:00:00Z',
       notes: 'Test note',
+      hostEmail: 'host@example.com',
+      guestEmail: 'guest@example.com',
     });
 
     expect(mockCtx.adapter.saveScheduleReturn).toHaveBeenCalledWith({
       meetingId: 'meet-123',
       scheduledFor: '2026-12-10T15:00:00Z',
       notes: 'Test note',
+      hostEmail: 'host@example.com',
+      guestEmail: 'guest@example.com',
+      agendaHostEventId: null,
+      agendaGuestEventId: null,
+      agendaMeetingLink: null,
     });
   });
 

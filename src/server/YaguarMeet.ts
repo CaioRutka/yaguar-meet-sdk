@@ -85,6 +85,7 @@ export class YaguarMeet extends EventEmitter {
       recording: this.recording,
       hooks: this.config.hooks,
       requireRecording: this.config.requireRecording,
+      onScheduleReturn: this.config.onScheduleReturn,
     });
 
     return this.io;

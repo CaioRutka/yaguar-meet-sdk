@@ -1,7 +1,7 @@
 import type { Server, Socket } from 'socket.io';
 import type { DatabaseAdapter } from '../adapters/DatabaseAdapter';
 import type { IceServerConfig } from '../shared/types';
-import type { YaguarMeetHooks } from './types';
+import type { YaguarMeetConfig, YaguarMeetHooks } from './types';
 import { RoomManager, type JoinRoomResult } from './RoomManager';
 import { RecordingSessionManager } from './RecordingSessionManager';
 
@@ -12,6 +12,7 @@ export interface SignalingContext {
   recording: RecordingSessionManager;
   hooks?: YaguarMeetHooks;
   requireRecording?: (userId: string) => Promise<boolean>;
+  onScheduleReturn?: YaguarMeetConfig['onScheduleReturn'];
 }
 
 interface JoinPayload {
@@ -41,6 +42,9 @@ interface SchedulePayload {
   meetingId: string;
   scheduledFor: string;
   notes?: string;
+  hostEmail: string;
+  guestEmail: string;
+  durationMinutes?: number;
 }
 
 type JoinOk = Extract<JoinRoomResult, { success: true }>;
@@ -318,13 +322,66 @@ export function registerSocketHandlers(io: Server, ctx: SignalingContext) {
         socket.emit('schedule:return:error', { message: 'Apenas o anfitrião pode agendar retorno.' });
         return;
       }
+
+      const hostEmail = typeof payload.hostEmail === 'string' ? payload.hostEmail.trim().toLowerCase() : '';
+      const guestEmail = typeof payload.guestEmail === 'string' ? payload.guestEmail.trim().toLowerCase() : '';
+      if (!hostEmail || !hostEmail.includes('@')) {
+        socket.emit('schedule:return:error', { message: 'Informe seu e-mail cadastrado no Yaguar Agenda.' });
+        return;
+      }
+      if (!guestEmail || !guestEmail.includes('@')) {
+        socket.emit('schedule:return:error', { message: 'Informe o e-mail do convidado.' });
+        return;
+      }
+      if (hostEmail === guestEmail) {
+        socket.emit('schedule:return:error', { message: 'O e-mail do convidado deve ser diferente do seu.' });
+        return;
+      }
+
       try {
+        const meetHostUserId = (socket.data as { meetUserId?: string }).meetUserId?.trim() ?? null;
+        let agendaHostEventId: string | null = null;
+        let agendaGuestEventId: string | null = null;
+        let agendaMeetingLink: string | null = null;
+        let agendaMessage: string | undefined;
+
+        if (ctx.onScheduleReturn) {
+          try {
+            const agenda = await ctx.onScheduleReturn({
+              meetingId: payload.meetingId,
+              roomId: payload.roomId,
+              scheduledFor: payload.scheduledFor,
+              notes: payload.notes ?? null,
+              hostEmail,
+              guestEmail,
+              meetHostUserId,
+            });
+            agendaHostEventId = agenda.agendaHostEventId ?? null;
+            agendaGuestEventId = agenda.agendaGuestEventId ?? null;
+            agendaMeetingLink = agenda.agendaMeetingLink ?? null;
+            agendaMessage = agenda.message;
+          } catch (agendaErr) {
+            const msg = agendaErr instanceof Error ? agendaErr.message : String(agendaErr);
+            socket.emit('schedule:return:error', { message: msg });
+            return;
+          }
+        }
+
         const row = await ctx.adapter.saveScheduleReturn({
           meetingId: payload.meetingId,
           scheduledFor: payload.scheduledFor,
           notes: payload.notes ?? null,
+          hostEmail,
+          guestEmail,
+          agendaHostEventId,
+          agendaGuestEventId,
+          agendaMeetingLink,
         });
-        io.in(payload.roomId).emit('schedule:return:confirmed', row);
+
+        io.in(payload.roomId).emit('schedule:return:confirmed', {
+          ...row,
+          agendaMessage,
+        });
       } catch (e) {
         socket.emit('schedule:return:error', { message: String(e) });
       }

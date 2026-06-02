@@ -170,15 +170,28 @@ export async function handleMeetHttp(
 
     if (method === 'POST' && segs.length === 3 && segs[0] === 'meetings' && segs[2] === 'schedule-return') {
       const meetingId = segs[1];
-      const body = (await readJsonBody(req)) as { scheduledFor?: string; notes?: string };
+      const body = (await readJsonBody(req)) as {
+        scheduledFor?: string;
+        notes?: string;
+        hostEmail?: string;
+        guestEmail?: string;
+      };
       if (!body?.scheduledFor) {
         sendJson(res, 400, { error: 'scheduledFor is required (ISO date string)' });
+        return true;
+      }
+      const hostEmail = body.hostEmail?.trim().toLowerCase() ?? '';
+      const guestEmail = body.guestEmail?.trim().toLowerCase() ?? '';
+      if (!hostEmail || !guestEmail) {
+        sendJson(res, 400, { error: 'hostEmail and guestEmail are required' });
         return true;
       }
       const row = await opts.adapter.saveScheduleReturn({
         meetingId,
         scheduledFor: body.scheduledFor,
         notes: body.notes ?? null,
+        hostEmail,
+        guestEmail,
       });
       sendJson(res, 201, row);
       return true;

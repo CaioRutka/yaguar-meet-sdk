@@ -98,6 +98,19 @@ export interface YaguarMeetConfig {
   hooks?: YaguarMeetHooks;
   /** When true for a host user id, pausing server-side recording is rejected. */
   requireRecording?: (userId: string) => Promise<boolean>;
+  /**
+   * After a schedule return is saved, sync to Yaguar Agenda (host + guest calendars).
+   * Return a message suffix for the client on partial success (e.g. guest without account).
+   */
+  onScheduleReturn?: (ctx: {
+    meetingId: string;
+    roomId: string;
+    scheduledFor: string;
+    notes?: string | null;
+    hostEmail: string;
+    guestEmail: string;
+    meetHostUserId?: string | null;
+  }) => Promise<{ agendaHostEventId?: string; agendaGuestEventId?: string; agendaMeetingLink?: string; message?: string }>;
 }
 
 export interface AttachOptions {

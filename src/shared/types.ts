@@ -99,6 +99,11 @@ export interface ScheduleReturnRecord {
   meetingId: string;
   scheduledFor: string;
   notes?: string | null;
+  hostEmail?: string | null;
+  guestEmail?: string | null;
+  agendaHostEventId?: string | null;
+  agendaGuestEventId?: string | null;
+  agendaMeetingLink?: string | null;
   createdAt: string;
 }
 
