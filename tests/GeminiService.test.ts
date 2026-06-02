@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { GeminiService } from '../src/server/ai/GeminiService';
+import { GeminiService, parseTimestampToMs } from '../src/server/ai/GeminiService';
 
 const mockGenerateContent = vi.fn();
 const mockUploadFile = vi.fn();
@@ -120,6 +120,33 @@ describe('GeminiService', () => {
     expect(mockDeleteFile).toHaveBeenCalledWith('files/audio-uuid-123');
   });
 
+  it('deve transcrever em segmentos com timestamps (transcribeAudioFileSegmented)', async () => {
+    mockUploadFile.mockResolvedValueOnce({ file: { name: 'files/audio-seg-1' } });
+    mockGetFile.mockResolvedValueOnce({
+      state: 'ACTIVE',
+      uri: 'https://generativelanguage.googleapis.com/v1beta/files/audio-seg-1',
+    });
+    mockGenerateContent.mockResolvedValueOnce({
+      response: {
+        text: () =>
+          JSON.stringify([
+            { start: '0:00', text: 'Isso. Uhum.' },
+            { start: '0:04', text: 'Tudo no mesmo ecossistema.' },
+            { start: '0:09', text: '   ' },
+          ]),
+      },
+    });
+    mockDeleteFile.mockResolvedValueOnce({});
+
+    const utterances = await service.transcribeAudioFileSegmented('path/to/audio.webm', 'audio/webm');
+
+    expect(utterances).toEqual([
+      { offsetMs: 0, text: 'Isso. Uhum.' },
+      { offsetMs: 4000, text: 'Tudo no mesmo ecossistema.' },
+    ]);
+    expect(mockDeleteFile).toHaveBeenCalledWith('files/audio-seg-1');
+  });
+
   it('deve lançar erro se o processamento do arquivo falhar', async () => {
     mockUploadFile.mockResolvedValueOnce({
       file: { name: 'files/audio-uuid-123' },
@@ -137,5 +164,22 @@ describe('GeminiService', () => {
     );
 
     expect(mockDeleteFile).toHaveBeenCalledWith('files/audio-uuid-123');
+  });
+});
+
+describe('parseTimestampToMs', () => {
+  it('converte MM:SS para milissegundos', () => {
+    expect(parseTimestampToMs('0:00')).toBe(0);
+    expect(parseTimestampToMs('1:05')).toBe(65000);
+  });
+
+  it('converte HH:MM:SS para milissegundos', () => {
+    expect(parseTimestampToMs('01:02:03')).toBe(3723000);
+  });
+
+  it('aceita número (segundos) e valores inválidos viram 0', () => {
+    expect(parseTimestampToMs(12)).toBe(12000);
+    expect(parseTimestampToMs('abc')).toBe(0);
+    expect(parseTimestampToMs(undefined)).toBe(0);
   });
 });

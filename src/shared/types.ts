@@ -38,6 +38,24 @@ export interface WaitingParticipant {
   requestedAt: string;
 }
 
+/**
+ * A single attributed line of the meeting transcript.
+ *
+ * Produced by the per-participant recording pipeline: each participant's
+ * microphone is captured separately, transcribed with timestamps, then merged
+ * into a single, time-ordered conversation with speaker labels.
+ */
+export interface TranscriptSegment {
+  /** Display name of who spoke this line (e.g. "Caio"). */
+  speaker: string;
+  /** Stable identity of the speaker (meet user id or socket id), when known. */
+  speakerId?: string | null;
+  /** Milliseconds from the start of the meeting (used to order speakers). */
+  startMs: number;
+  /** The transcribed text for this utterance. */
+  text: string;
+}
+
 export interface MeetingRecord {
   id: string;
   roomId: string;
@@ -47,6 +65,12 @@ export interface MeetingRecord {
   participantCount?: number | null;
   status: 'active' | 'ended' | 'processing' | 'completed';
   transcript?: string | null;
+  /**
+   * Speaker-attributed, time-ordered transcript. Stored alongside the flat
+   * `transcript` string. Persisted inside `metadata.transcriptSegments` by the
+   * default adapters to avoid a schema migration.
+   */
+  transcriptSegments?: TranscriptSegment[] | null;
   audioUrl?: string | null;
   metadata?: Record<string, unknown> | null;
 }

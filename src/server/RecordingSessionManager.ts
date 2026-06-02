@@ -8,15 +8,36 @@ import { finished } from 'node:stream/promises';
 type SessionState = {
   filePath: string;
   mimeType: string;
+  startedAt: number;
   stream: WriteStream;
 };
 
 export type RecordingSegment = {
   filePath: string;
   mimeType: string;
+  /** Server-side epoch ms when this segment started (used to interleave speakers). */
+  startedAt: number;
+  /** Display name of the participant who produced this audio. */
+  speaker: string;
+  /** Stable identity of the speaker (meet user id or socket id). */
+  speakerId: string;
 };
 
-type MeetingRecording = {
+/** Identity/config for a participant's recording stream. */
+export interface StartRecordingOptions {
+  /** Unique key for this participant within the meeting (typically the socket id). */
+  participantKey: string;
+  /** Display name used as the speaker label in the transcript. */
+  speaker: string;
+  /** Stable identity of the speaker. */
+  speakerId: string;
+  /** Audio mime type (default `audio/webm`). */
+  mimeType?: string;
+}
+
+type ParticipantRecording = {
+  speaker: string;
+  speakerId: string;
   segments: RecordingSegment[];
   active: SessionState | null;
 };
@@ -26,12 +47,17 @@ function safeKeySegment(key: string): string {
 }
 
 /**
- * Appends audio chunks to temp files per meeting (or room) for server-side processing.
- * Supports multiple segments when the host pauses and resumes recording.
+ * Appends audio chunks to temp files for server-side processing.
+ *
+ * Each meeting holds one recording per participant (keyed by `participantKey`),
+ * so the AI pipeline can transcribe every microphone separately and attribute
+ * each line to who spoke it. Pause/resume creates multiple segments per
+ * participant.
  */
 export class RecordingSessionManager {
   private readonly tmpDir: string;
-  private meetings = new Map<string, MeetingRecording>();
+  /** meetingKey → participantKey → recording */
+  private meetings = new Map<string, Map<string, ParticipantRecording>>();
   private ensuredMkdir = false;
 
   /**
@@ -47,69 +73,101 @@ export class RecordingSessionManager {
     this.ensuredMkdir = true;
   }
 
-  private getOrCreateMeeting(key: string): MeetingRecording {
+  private getOrCreateMeeting(key: string): Map<string, ParticipantRecording> {
     let meeting = this.meetings.get(key);
     if (!meeting) {
-      meeting = { segments: [], active: null };
+      meeting = new Map();
       this.meetings.set(key, meeting);
     }
     return meeting;
   }
 
-  /** Starts a new recording segment (finalizes any active segment first). */
-  async start(key: string, mimeType: string): Promise<void> {
-    await this.ensureTmpDir();
-    await this.finalizeActive(key);
-
-    const fileName = `yaguar-meet-${safeKeySegment(key)}-${randomBytes(8).toString('hex')}.webm`;
-    const filePath = path.join(this.tmpDir, fileName);
-    const stream = createWriteStream(filePath, { flags: 'w' });
-    const mime = mimeType?.trim() || 'audio/webm';
-
+  private getOrCreateParticipant(
+    key: string,
+    opts: { participantKey: string; speaker: string; speakerId: string }
+  ): ParticipantRecording {
     const meeting = this.getOrCreateMeeting(key);
-    meeting.active = { filePath, mimeType: mime, stream };
+    let participant = meeting.get(opts.participantKey);
+    if (!participant) {
+      participant = { speaker: opts.speaker, speakerId: opts.speakerId, segments: [], active: null };
+      meeting.set(opts.participantKey, participant);
+    } else {
+      // Refresh identity in case the display name changed mid-meeting.
+      participant.speaker = opts.speaker;
+      participant.speakerId = opts.speakerId;
+    }
+    return participant;
   }
 
-  appendChunk(key: string, data: Buffer): void {
-    const meeting = this.meetings.get(key);
-    const active = meeting?.active;
+  /** Starts a new recording segment for a participant (finalizes any active one first). */
+  async start(key: string, opts: StartRecordingOptions): Promise<void> {
+    await this.ensureTmpDir();
+    await this.finalizeActive(key, opts.participantKey);
+
+    const fileName = `yaguar-meet-${safeKeySegment(key)}-${safeKeySegment(opts.participantKey)}-${randomBytes(6).toString('hex')}.webm`;
+    const filePath = path.join(this.tmpDir, fileName);
+    const stream = createWriteStream(filePath, { flags: 'w' });
+    const mime = opts.mimeType?.trim() || 'audio/webm';
+
+    const participant = this.getOrCreateParticipant(key, opts);
+    participant.active = { filePath, mimeType: mime, startedAt: Date.now(), stream };
+  }
+
+  appendChunk(key: string, participantKey: string, data: Buffer): void {
+    const active = this.meetings.get(key)?.get(participantKey)?.active;
     if (!active) return;
     active.stream.write(data);
   }
 
-  /** Finalizes the active segment without ending the meeting recording. */
-  async pause(key: string): Promise<void> {
-    await this.finalizeActive(key);
+  /** Finalizes a participant's active segment without ending the meeting recording. */
+  async pauseParticipant(key: string, participantKey: string): Promise<void> {
+    await this.finalizeActive(key, participantKey);
   }
 
   /**
-   * Finalizes any active segment and returns all segments for upload/transcription.
+   * Finalizes every participant's active segment and returns all segments
+   * (across participants), ordered by start time, for transcription.
    * Deletes empty files. Returns null when no audio was captured.
    */
   async stop(key: string): Promise<{ segments: RecordingSegment[] } | null> {
-    await this.finalizeActive(key);
     const meeting = this.meetings.get(key);
-    if (!meeting || meeting.segments.length === 0) {
-      this.meetings.delete(key);
-      return null;
+    if (!meeting) return null;
+
+    for (const participantKey of meeting.keys()) {
+      await this.finalizeActive(key, participantKey);
     }
-    const segments = [...meeting.segments];
+
+    const segments: RecordingSegment[] = [];
+    for (const participant of meeting.values()) {
+      segments.push(...participant.segments);
+    }
     this.meetings.delete(key);
+
+    if (segments.length === 0) return null;
+    segments.sort((a, b) => a.startedAt - b.startedAt);
     return { segments };
   }
 
   hasSession(key: string): boolean {
     const meeting = this.meetings.get(key);
-    return Boolean(meeting?.active || (meeting?.segments.length ?? 0) > 0);
+    if (!meeting) return false;
+    for (const p of meeting.values()) {
+      if (p.active || p.segments.length > 0) return true;
+    }
+    return false;
   }
 
-  private async finalizeActive(key: string): Promise<void> {
-    const meeting = this.meetings.get(key);
-    const active = meeting?.active;
-    if (!active) return;
+  hasActiveParticipant(key: string, participantKey: string): boolean {
+    return Boolean(this.meetings.get(key)?.get(participantKey)?.active);
+  }
 
-    meeting!.active = null;
-    const { filePath, mimeType, stream } = active;
+  private async finalizeActive(key: string, participantKey: string): Promise<void> {
+    const participant = this.meetings.get(key)?.get(participantKey);
+    const active = participant?.active;
+    if (!participant || !active) return;
+
+    participant.active = null;
+    const { filePath, mimeType, startedAt, stream } = active;
 
     try {
       stream.end();
@@ -125,18 +183,15 @@ export class RecordingSessionManager {
         await unlink(filePath).catch(() => {});
         return;
       }
-      meeting!.segments.push({ filePath, mimeType });
+      participant.segments.push({
+        filePath,
+        mimeType,
+        startedAt,
+        speaker: participant.speaker,
+        speakerId: participant.speakerId,
+      });
     } catch {
       await unlink(filePath).catch(() => {});
     }
-  }
-
-  private async closeSessionDiscard(s: SessionState): Promise<void> {
-    try {
-      s.stream.destroy();
-    } catch {
-      /* ignore */
-    }
-    await unlink(s.filePath).catch(() => {});
   }
 }

@@ -5,10 +5,10 @@ import { Server as SocketIOServer } from 'socket.io';
 import type { AIService } from './ai/AIService';
 import type { DatabaseAdapter } from '../adapters/DatabaseAdapter';
 import { handleMeetHttp } from './http/meetHttp';
-import { RecordingSessionManager } from './RecordingSessionManager';
+import { RecordingSessionManager, type RecordingSegment } from './RecordingSessionManager';
 import { RoomManager } from './RoomManager';
 import { registerSocketHandlers } from './registerSocketHandlers';
-import type { IceServerConfig } from '../shared/types';
+import type { IceServerConfig, TranscriptSegment } from '../shared/types';
 import type {
   MeetingEndContext,
   YaguarMeetConfig,
@@ -172,6 +172,54 @@ export class YaguarMeet extends EventEmitter {
     await this.adapter.updateMeeting(meetingId, { metadata: { ...prev, ...patch } });
   }
 
+  /**
+   * Transcribe every participant's audio separately and merge the utterances
+   * into a single, time-ordered conversation with speaker labels.
+   *
+   * Uses {@link AIService.transcribeAudioFileSegmented} for per-utterance
+   * timestamps when available; otherwise falls back to a single block per
+   * segment. Throws only if the AI service is unavailable for every segment.
+   */
+  private async transcribeSegments(segments: RecordingSegment[]): Promise<TranscriptSegment[]> {
+    const ai = this.ai;
+    if (!ai) return [];
+
+    const minStart = Math.min(...segments.map((s) => s.startedAt));
+    const lines: TranscriptSegment[] = [];
+
+    for (const segment of segments) {
+      let utterances: { offsetMs: number; text: string }[] | null = null;
+
+      if (ai.transcribeAudioFileSegmented) {
+        try {
+          utterances = await ai.transcribeAudioFileSegmented(segment.filePath, segment.mimeType);
+        } catch (e) {
+          console.error('[YaguarMeet] transcribeAudioFileSegmented; falling back to plain', e);
+          utterances = null;
+        }
+      }
+
+      if (!utterances) {
+        const text = await ai.transcribeAudioFile(segment.filePath, segment.mimeType);
+        utterances = text.trim() ? [{ offsetMs: 0, text: text.trim() }] : [];
+      }
+
+      for (const u of utterances) {
+        const text = u.text.trim();
+        if (!text) continue;
+        lines.push({
+          speaker: segment.speaker,
+          speakerId: segment.speakerId,
+          startMs: Math.max(0, segment.startedAt - minStart + u.offsetMs),
+          text,
+        });
+      }
+    }
+
+    lines.sort((a, b) => a.startMs - b.startMs);
+    return mergeAdjacentSameSpeaker(lines);
+  }
+
   private async processMeetingPipeline(ctx: {
     roomId: string;
     meetingId: string;
@@ -183,23 +231,20 @@ export class YaguarMeet extends EventEmitter {
     }
 
     let tempPaths: string[] = [];
-    let stopped: { segments: { filePath: string; mimeType: string }[] } | null = null;
+    let stopped: { segments: RecordingSegment[] } | null = null;
     try {
       stopped = await this.recording.stop(meetingId);
       if (stopped) tempPaths = stopped.segments.map((s) => s.filePath);
 
       let transcript = '';
+      let transcriptSegments: TranscriptSegment[] = [];
 
       if (stopped && stopped.segments.length > 0 && this.ai) {
         try {
-          const parts: string[] = [];
-          for (const segment of stopped.segments) {
-            const text = await this.ai.transcribeAudioFile(segment.filePath, segment.mimeType);
-            if (text.trim()) parts.push(text.trim());
-          }
-          transcript = parts.join('\n\n');
+          transcriptSegments = await this.transcribeSegments(stopped.segments);
+          transcript = transcriptSegments.map((l) => `${l.speaker}: ${l.text}`).join('\n');
         } catch (e) {
-          console.error('[YaguarMeet] transcribeAudioFile', e);
+          console.error('[YaguarMeet] transcribeSegments', e);
           await this.mergeMeetingMetadata(meetingId, {
             transcribeError: String(e),
             analysisFallback:
@@ -209,7 +254,7 @@ export class YaguarMeet extends EventEmitter {
       } else if (!stopped || stopped.segments.length === 0) {
         await this.mergeMeetingMetadata(meetingId, {
           analysisFallback:
-            'Nenhum áudio foi recebido. Só o anfitrião pode iniciar a gravação para IA — ative-a durante a próxima reunião.',
+            'Nenhum áudio foi recebido. O anfitrião precisa ativar a gravação para IA durante a próxima reunião.',
         });
       }
 
@@ -218,6 +263,9 @@ export class YaguarMeet extends EventEmitter {
           transcript: transcript.trim() ? transcript : null,
           status: 'processing',
         });
+        if (transcriptSegments.length > 0) {
+          await this.mergeMeetingMetadata(meetingId, { transcriptSegments });
+        }
       } catch (e) {
         console.error('[YaguarMeet] updateMeeting transcript', e);
       }
@@ -294,4 +342,21 @@ export class YaguarMeet extends EventEmitter {
       }
     }
   }
+}
+
+/**
+ * Collapses consecutive lines from the same speaker into one, so the transcript
+ * reads as natural turns ("Caio: ... Uhum. Não...") instead of many fragments.
+ */
+function mergeAdjacentSameSpeaker(lines: TranscriptSegment[]): TranscriptSegment[] {
+  const merged: TranscriptSegment[] = [];
+  for (const line of lines) {
+    const last = merged[merged.length - 1];
+    if (last && last.speakerId === line.speakerId && last.speaker === line.speaker) {
+      last.text = `${last.text} ${line.text}`.trim();
+    } else {
+      merged.push({ ...line });
+    }
+  }
+  return merged;
 }

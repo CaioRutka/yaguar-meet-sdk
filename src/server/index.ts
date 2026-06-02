@@ -55,6 +55,7 @@ export type {
   ParticipantRecord,
   ScheduleReturnRecord,
   MeetingAnalysisResult,
+  TranscriptSegment,
   LiveParticipantView,
   ChatMessagePayload,
 } from '../shared/types';

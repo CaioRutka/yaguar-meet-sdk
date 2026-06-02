@@ -66,7 +66,7 @@ describe('registerSocketHandlers', () => {
       recording: {
         start: vi.fn().mockResolvedValue(undefined),
         appendChunk: vi.fn(),
-        pause: vi.fn().mockResolvedValue(undefined),
+        pauseParticipant: vi.fn().mockResolvedValue(undefined),
       },
       hooks: {
         onJoin: vi.fn().mockResolvedValue(undefined),
@@ -91,6 +91,8 @@ describe('registerSocketHandlers', () => {
     expect(socketHandlers['room:join']).toBeDefined();
     expect(socketHandlers['chat:message']).toBeDefined();
     expect(socketHandlers['mic:speaking']).toBeDefined();
+    expect(socketHandlers['mic:muted']).toBeDefined();
+    expect(socketHandlers['room:end']).toBeDefined();
     expect(socketHandlers['disconnect']).toBeDefined();
   });
 
@@ -116,29 +118,64 @@ describe('registerSocketHandlers', () => {
     expect(mockIo.in).toHaveBeenCalledWith('room-123');
   });
 
-  it('deve iniciar gravação de áudio (recording:start)', async () => {
-    mockSocket.data = { meetUserId: 'user-host-123', meetingId: 'meet-123' };
+  it('anfitrião ativa a gravação para todos (recording:enable)', async () => {
+    mockSocket.data = { meetUserId: 'user-host-123', meetingId: 'meet-123', roomId: 'room-123' };
+
+    await socketHandlers['recording:enable']({ roomId: 'room-123' });
+
+    expect(mockIo.in).toHaveBeenCalledWith('room-123');
+  });
+
+  it('deve iniciar gravação por participante quando ativa (recording:start)', async () => {
+    mockSocket.data = {
+      meetUserId: 'user-host-123',
+      meetingId: 'meet-123',
+      roomId: 'room-123',
+      name: 'Caio',
+    };
+
+    await socketHandlers['recording:enable']({ roomId: 'room-123' });
+    await socketHandlers['recording:start']({ roomId: 'room-123' });
+
+    expect(mockCtx.recording.start).toHaveBeenCalledWith(
+      'meet-123',
+      expect.objectContaining({
+        participantKey: 'socket-client-123',
+        speaker: 'Caio',
+        speakerId: 'user-host-123',
+        mimeType: 'audio/webm',
+      })
+    );
+  });
+
+  it('não grava quando a reunião não está ativa (recording:start)', async () => {
+    mockSocket.data = { meetUserId: 'user-host-123', meetingId: 'meet-123', roomId: 'room-123' };
 
     await socketHandlers['recording:start']({ roomId: 'room-123' });
 
-    expect(mockCtx.recording.start).toHaveBeenCalledWith('meet-123', 'audio/webm');
+    expect(mockCtx.recording.start).not.toHaveBeenCalled();
   });
 
-  it('deve anexar chunks de áudio em base64 (recording:chunk)', async () => {
-    mockSocket.data = { meetUserId: 'user-host-123', meetingId: 'meet-123' };
+  it('deve anexar chunks por participante (recording:chunk)', async () => {
+    mockSocket.data = { meetUserId: 'user-host-123', meetingId: 'meet-123', roomId: 'room-123' };
 
+    await socketHandlers['recording:enable']({ roomId: 'room-123' });
     const base64Chunk = Buffer.from('dummy-audio-data').toString('base64');
     await socketHandlers['recording:chunk']({ roomId: 'room-123', chunk: base64Chunk });
 
-    expect(mockCtx.recording.appendChunk).toHaveBeenCalledWith('meet-123', expect.any(Buffer));
+    expect(mockCtx.recording.appendChunk).toHaveBeenCalledWith(
+      'meet-123',
+      'socket-client-123',
+      expect.any(Buffer)
+    );
   });
 
-  it('deve pausar a gravação de áudio (recording:stop)', async () => {
-    mockSocket.data = { meetUserId: 'user-host-123', meetingId: 'meet-123' };
+  it('deve finalizar o segmento do participante (recording:stop)', async () => {
+    mockSocket.data = { meetUserId: 'user-host-123', meetingId: 'meet-123', roomId: 'room-123' };
 
     await socketHandlers['recording:stop']({ roomId: 'room-123' });
 
-    expect(mockCtx.recording.pause).toHaveBeenCalledWith('meet-123');
+    expect(mockCtx.recording.pauseParticipant).toHaveBeenCalledWith('meet-123', 'socket-client-123');
   });
 
   it('deve emitir o status de fala no microfone (mic:speaking)', async () => {
@@ -147,6 +184,29 @@ describe('registerSocketHandlers', () => {
     await socketHandlers['mic:speaking']({ roomId: 'room-123', speaking: true });
 
     expect(mockSocket.to).toHaveBeenCalledWith('room-123');
+  });
+
+  it('deve emitir o status de mute no microfone (mic:muted)', async () => {
+    mockSocket.data = { roomId: 'room-123' };
+
+    await socketHandlers['mic:muted']({ roomId: 'room-123', muted: true });
+
+    expect(mockSocket.to).toHaveBeenCalledWith('room-123');
+  });
+
+  it('deve encerrar a reunião para todos (room:end)', async () => {
+    mockSocket.data = { meetUserId: 'user-host-123' };
+
+    const remoteSock = { id: 'socket-other', disconnect: vi.fn(), emit: vi.fn() };
+    mockIo.in = vi.fn().mockReturnValue({
+      emit: vi.fn(),
+      fetchSockets: vi.fn().mockResolvedValue([remoteSock]),
+    });
+
+    await socketHandlers['room:end']({ roomId: 'room-123' });
+
+    expect(mockSocket.to).toHaveBeenCalledWith('room-123');
+    expect(remoteSock.disconnect).toHaveBeenCalledWith(true);
   });
 
   it('deve agendar o retorno da reunião (schedule:return)', async () => {

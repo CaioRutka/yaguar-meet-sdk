@@ -132,9 +132,19 @@ export async function handleMeetHttp(
         : [];
       const analysisFallback =
         typeof meeting.metadata?.analysisFallback === 'string' ? meeting.metadata.analysisFallback : null;
-      const meetingOut: typeof meeting = self.isHost
-        ? meeting
-        : { ...meeting, transcript: null, metadata: meeting.metadata };
+      let meetingOut: typeof meeting = meeting;
+      if (!self.isHost) {
+        // Guests never receive the transcript or its speaker-attributed form.
+        const guestMetadata =
+          meeting.metadata && typeof meeting.metadata === 'object' && !Array.isArray(meeting.metadata)
+            ? { ...(meeting.metadata as Record<string, unknown>) }
+            : meeting.metadata;
+        if (guestMetadata && typeof guestMetadata === 'object') {
+          delete (guestMetadata as Record<string, unknown>).transcriptSegments;
+          delete (guestMetadata as Record<string, unknown>).transcribeError;
+        }
+        meetingOut = { ...meeting, transcript: null, transcriptSegments: null, metadata: guestMetadata };
+      }
       sendJson(res, 200, {
         meeting: meetingOut,
         attendees,

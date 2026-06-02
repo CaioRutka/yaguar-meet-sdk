@@ -56,10 +56,12 @@ async function completeJoinedSocketSession(
   roomId: string,
   name: string,
   uid: string | undefined,
-  result: JoinOk
+  result: JoinOk,
+  recordingActive: Map<string, boolean>
 ): Promise<void> {
   socket.join(roomId);
-  (socket.data as { roomId?: string; meetingId?: string }).roomId = roomId;
+  (socket.data as { roomId?: string; meetingId?: string; name?: string }).roomId = roomId;
+  (socket.data as { name?: string }).name = name;
   if (result.meetingId) {
     (socket.data as { meetingId?: string }).meetingId = result.meetingId;
   }
@@ -99,6 +101,13 @@ async function completeJoinedSocketSession(
     }
   }
 
+  // Tell late joiners whether the meeting is already being recorded for AI, so
+  // their client starts capturing its own microphone for speaker attribution.
+  const recKey = result.meetingId ?? roomId;
+  if (recordingActive.get(recKey)) {
+    socket.emit('recording:active', { active: true });
+  }
+
   try {
     await ctx.hooks?.onJoin?.({
       roomId,
@@ -114,6 +123,15 @@ async function completeJoinedSocketSession(
 }
 
 export function registerSocketHandlers(io: Server, ctx: SignalingContext) {
+  // Meeting-level "recording for AI" state, keyed by meetingId (fallback roomId).
+  // The host toggles it; all participants capture their own mic while active.
+  const recordingActive = new Map<string, boolean>();
+
+  const recordingKey = (socket: Socket, roomId: string): string => {
+    const mid = (socket.data as { meetingId?: string }).meetingId;
+    return mid ?? roomId;
+  };
+
   io.on('connection', (socket: Socket) => {
     console.log(`[Socket] Connected: ${socket.id}`);
     socket.emit('config:ice-servers', ctx.iceServers);
@@ -140,7 +158,7 @@ export function registerSocketHandlers(io: Server, ctx: SignalingContext) {
         return;
       }
 
-      await completeJoinedSocketSession(io, socket, ctx, roomId, name, uid, result);
+      await completeJoinedSocketSession(io, socket, ctx, roomId, name, uid, result, recordingActive);
     });
 
     socket.on('room:admit', async ({ roomId, socketId }: { roomId: string; socketId: string }) => {
@@ -170,7 +188,7 @@ export function registerSocketHandlers(io: Server, ctx: SignalingContext) {
       delete (target.data as { pendingRoomId?: string }).pendingRoomId;
       const targetUid = (target.data as { meetUserId?: string }).meetUserId?.trim();
       target.emit('room:admitted', { roomId });
-      await completeJoinedSocketSession(io, target, ctx, roomId, pending.name, targetUid, result);
+      await completeJoinedSocketSession(io, target, ctx, roomId, pending.name, targetUid, result, recordingActive);
     });
 
     socket.on('room:reject', async ({ roomId, socketId }: { roomId: string; socketId: string }) => {
@@ -258,6 +276,18 @@ export function registerSocketHandlers(io: Server, ctx: SignalingContext) {
       }
     });
 
+    socket.on('room:end', async ({ roomId }: { roomId: string }) => {
+      if (!(await isMeetingHost(ctx.adapter, socket, roomId))) {
+        socket.emit('room:error', { message: 'Apenas o anfitrião pode encerrar a reunião.' });
+        return;
+      }
+      socket.to(roomId).emit('room:ended-by-host');
+      const sockets = await io.in(roomId).fetchSockets();
+      for (const s of sockets) {
+        if (s.id !== socket.id) s.disconnect(true);
+      }
+    });
+
 
     socket.on('mic:speaking', ({ roomId, speaking }: { roomId: string; speaking: boolean }) => {
       const data = socket.data as { roomId?: string };
@@ -268,32 +298,33 @@ export function registerSocketHandlers(io: Server, ctx: SignalingContext) {
       });
     });
 
-    socket.on('recording:start', async ({ roomId, mimeType }: RecordingPayload) => {
+    socket.on('mic:muted', ({ roomId, muted }: { roomId: string; muted: boolean }) => {
+      const data = socket.data as { roomId?: string };
+      if (!roomId || data.roomId !== roomId) return;
+      socket.to(roomId).emit('mic:muted', {
+        socketId: socket.id,
+        muted: Boolean(muted),
+      });
+    });
+
+    // Host enables AI recording for the whole meeting. Every participant then
+    // captures their own microphone (see `recording:start`).
+    socket.on('recording:enable', async ({ roomId }: RecordingPayload) => {
       if (!(await isMeetingHost(ctx.adapter, socket, roomId))) {
         socket.emit('recording:error', { message: 'Apenas o anfitrião pode gravar para IA.' });
         return;
       }
-      const mid = (socket.data as { meetingId?: string }).meetingId;
-      const key = mid ?? roomId;
-      try {
-        await ctx.recording.start(key, mimeType || 'audio/webm');
-      } catch (e) {
-        console.error('[Socket] recording:start', e);
-        socket.emit('recording:error', { message: 'Não foi possível iniciar a gravação.' });
+      const key = recordingKey(socket, roomId);
+      recordingActive.set(key, true);
+      io.in(roomId).emit('recording:active', { active: true });
+    });
+
+    // Host disables AI recording for the meeting (blocked when mandatory).
+    socket.on('recording:disable', async ({ roomId }: RecordingPayload) => {
+      if (!(await isMeetingHost(ctx.adapter, socket, roomId))) {
+        socket.emit('recording:error', { message: 'Apenas o anfitrião pode gravar para IA.' });
+        return;
       }
-    });
-
-    socket.on('recording:chunk', async ({ roomId, chunk }: RecordingPayload) => {
-      if (!chunk) return;
-      if (!(await isMeetingHost(ctx.adapter, socket, roomId))) return;
-      const mid = (socket.data as { meetingId?: string }).meetingId;
-      const key = mid ?? roomId;
-      ctx.recording.appendChunk(key, Buffer.from(chunk, 'base64'));
-    });
-
-    // Client stops the MediaRecorder — finalize the active segment on the server.
-    socket.on('recording:stop', async ({ roomId }: RecordingPayload) => {
-      if (!(await isMeetingHost(ctx.adapter, socket, roomId))) return;
       const uid = (socket.data as { meetUserId?: string }).meetUserId;
       if (uid && ctx.requireRecording) {
         try {
@@ -304,13 +335,53 @@ export function registerSocketHandlers(io: Server, ctx: SignalingContext) {
             return;
           }
         } catch (e) {
-          console.error('[Socket] recording:stop requireRecording', e);
+          console.error('[Socket] recording:disable requireRecording', e);
         }
       }
-      const mid = (socket.data as { meetingId?: string }).meetingId;
-      const key = mid ?? roomId;
+      const key = recordingKey(socket, roomId);
+      recordingActive.set(key, false);
+      io.in(roomId).emit('recording:active', { active: false });
+    });
+
+    // A participant starts capturing their own microphone. Allowed only while
+    // the meeting recording is active. Audio is tracked per participant so the
+    // transcript can attribute each line to who spoke it.
+    socket.on('recording:start', async ({ roomId, mimeType }: RecordingPayload) => {
+      const data = socket.data as { roomId?: string };
+      if (data.roomId !== roomId) return;
+      const key = recordingKey(socket, roomId);
+      if (!recordingActive.get(key)) return;
+      const speaker = (socket.data as { name?: string }).name?.trim() || 'Participante';
+      const speakerId = (socket.data as { meetUserId?: string }).meetUserId?.trim() || socket.id;
       try {
-        await ctx.recording.pause(key);
+        await ctx.recording.start(key, {
+          participantKey: socket.id,
+          speaker,
+          speakerId,
+          mimeType: mimeType || 'audio/webm',
+        });
+      } catch (e) {
+        console.error('[Socket] recording:start', e);
+        socket.emit('recording:error', { message: 'Não foi possível iniciar a gravação.' });
+      }
+    });
+
+    socket.on('recording:chunk', ({ roomId, chunk }: RecordingPayload) => {
+      if (!chunk) return;
+      const data = socket.data as { roomId?: string };
+      if (data.roomId !== roomId) return;
+      const key = recordingKey(socket, roomId);
+      if (!recordingActive.get(key)) return;
+      ctx.recording.appendChunk(key, socket.id, Buffer.from(chunk, 'base64'));
+    });
+
+    // Client stops its MediaRecorder — finalize this participant's active segment.
+    socket.on('recording:stop', async ({ roomId }: RecordingPayload) => {
+      const data = socket.data as { roomId?: string };
+      if (data.roomId !== roomId) return;
+      const key = recordingKey(socket, roomId);
+      try {
+        await ctx.recording.pauseParticipant(key, socket.id);
       } catch (e) {
         console.error('[Socket] recording:stop', e);
         socket.emit('recording:error', { message: 'Não foi possível pausar a gravação.' });
@@ -418,6 +489,12 @@ async function handleDisconnect(socket: Socket, io: Server, ctx: SignalingContex
   if (!participant) return;
 
   socket.leave(roomId);
+
+  // Flush this participant's in-progress recording so their audio isn't lost.
+  const recKey = (socket.data as { meetingId?: string }).meetingId ?? roomId;
+  void ctx.recording.pauseParticipant(recKey, socket.id).catch((e) => {
+    console.error('[Socket] disconnect pauseParticipant', e);
+  });
 
   io.in(roomId).emit('user:left', {
     socketId: socket.id,
